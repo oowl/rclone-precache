@@ -248,7 +248,7 @@
                         updateEntryCachedSize(path, progress.cached_size);
                     }
 
-                    if (precachingItemsRef.current.has(path)) {
+                    if (precachingItemsRef.current.has(path) && !progress.is_complete) {
                         setTimeout(() => monitorCacheProgress(path), 1000);
                     }
                 } catch (err) {
@@ -354,7 +354,7 @@
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-200">
-                                        {entries.map((entry) => (
+                                        {sortEntries(entries).map((entry) => (
                                             <tr key={entry.path}
                                                 className="hover:bg-gray-50 cursor-pointer"
                                                 onClick={() => entry.is_dir && setCurrentPath(entry.path)}

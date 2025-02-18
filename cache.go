@@ -9,21 +9,28 @@ import (
 	"time"
 )
 
+type SpeedWindow struct {
+	bytesRead int64
+	timestamp time.Time
+}
+
 type FileInfo struct {
 	Name        string  `json:"name"`
 	Path        string  `json:"path"`
 	IsDir       bool    `json:"is_dir"`
-	Size        *int64  `json:"size"` // Changed to pointer to allow null for directories
+	Size        *int64  `json:"size"`
 	CreatedTime float64 `json:"created_time"`
 	CachedSize  int64   `json:"cached_size"`
 }
 
 type CacheProgress struct {
-	CurrentSpeed   float64 `json:"current_speed"`
-	TotalBytesRead int64   `json:"total_bytes_read"`
-	TotalSize      int64   `json:"total_size"`
-	IsComplete     bool    `json:"is_complete"`
-	CachedSize     int64   `json:"cached_size"`
+	CurrentSpeed   float64       `json:"current_speed"`
+	TotalBytesRead int64         `json:"total_bytes_read"`
+	TotalSize      int64         `json:"total_size"`
+	IsComplete     bool          `json:"is_complete"`
+	CachedSize     int64         `json:"cached_size"`
+	buffer         []byte        // Buffer for reading file data
+	speedWindows   []SpeedWindow // Track speed history
 }
 
 type GlobalProgress struct {
@@ -33,7 +40,6 @@ type GlobalProgress struct {
 	CachedSize     int64   `json:"cached_size"`
 }
 
-// CacheManager handles active caching operations
 type CacheManager struct {
 	sync.RWMutex
 	chunkSize int
@@ -49,20 +55,49 @@ func NewCacheManager(chunkSize int) *CacheManager {
 	}
 }
 
-// cacheFile handles caching a single file
-func (cm *CacheManager) cacheFile(sourcePath, cachePath string, progress *CacheProgress) error {
-	startTime := time.Now()
-	lastUpdate := startTime
+// updateSpeed calculates the average speed over the last 5 seconds
+func (cp *CacheProgress) updateSpeed(bytesRead int64, currentTime time.Time) {
+	// Add new window
+	cp.speedWindows = append(cp.speedWindows, SpeedWindow{
+		bytesRead: bytesRead,
+		timestamp: currentTime,
+	})
 
+	// Remove windows older than 5 seconds
+	cutoffTime := currentTime.Add(-5 * time.Second)
+	var validWindows []SpeedWindow
+	var totalBytes int64
+
+	for _, window := range cp.speedWindows {
+		if window.timestamp.After(cutoffTime) {
+			validWindows = append(validWindows, window)
+			totalBytes += window.bytesRead
+		}
+	}
+
+	cp.speedWindows = validWindows
+
+	// Calculate average speed over the valid windows
+	if len(validWindows) > 0 {
+		timeRange := currentTime.Sub(validWindows[0].timestamp).Seconds()
+		if timeRange > 0 {
+			cp.CurrentSpeed = float64(totalBytes) / timeRange
+		}
+	}
+}
+
+func (cm *CacheManager) cacheFile(sourcePath, _ string, progress *CacheProgress) error {
 	sourceFile, err := os.Open(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer sourceFile.Close()
 
-	buffer := make([]byte, cm.chunkSize)
+	nn := 0
+	lastUpdate := time.Now()
+
 	for {
-		n, err := sourceFile.Read(buffer)
+		n, err := sourceFile.Read(progress.buffer)
 		if err == io.EOF {
 			break
 		}
@@ -70,20 +105,29 @@ func (cm *CacheManager) cacheFile(sourcePath, cachePath string, progress *CacheP
 			return err
 		}
 
-		progress.TotalBytesRead += int64(n)
 		currentTime := time.Now()
+		nn += n
 
 		if currentTime.Sub(lastUpdate) >= time.Second {
 			cm.Lock()
-			progress.CurrentSpeed = float64(progress.TotalBytesRead) / currentTime.Sub(startTime).Seconds()
-			progress.CachedSize = cm.sizer.calculateSize(cachePath)
+			progress.TotalBytesRead += int64(nn)
+			progress.updateSpeed(int64(nn), currentTime)
+			progress.CachedSize += int64(nn)
 			cm.Unlock()
+			nn = 0
 			lastUpdate = currentTime
 		}
 	}
 
-	progress.CurrentSpeed = float64(progress.TotalBytesRead) / time.Since(startTime).Seconds()
-	progress.CachedSize = cm.sizer.calculateSize(cachePath)
+	// Handle any remaining bytes
+	if nn > 0 {
+		cm.Lock()
+		progress.TotalBytesRead += int64(nn)
+		progress.updateSpeed(int64(nn), time.Now())
+		progress.CachedSize += int64(nn)
+		cm.Unlock()
+	}
+
 	return nil
 }
 
@@ -101,6 +145,8 @@ func (cm *CacheManager) StartProgress(sourcePath, cachePath string) (*CacheProgr
 		TotalBytesRead: 0,
 		TotalSize:      cm.sizer.GetAllocatedSize(sourcePath),
 		IsComplete:     false,
+		speedWindows:   make([]SpeedWindow, 0),
+		buffer:         make([]byte, cm.chunkSize),
 	}
 	cm.active[sourcePath] = progress
 
@@ -130,10 +176,12 @@ func (cm *CacheManager) StartProgress(sourcePath, cachePath string) (*CacheProgr
 				log.Printf("Error walking directory %s: %v", sourcePath, err)
 			}
 		}
+		cm.CompleteProgress(sourcePath)
 	}()
 	return progress, nil
 }
 
+// Other methods remain unchanged
 func (cm *CacheManager) GetProgress(path string) (*CacheProgress, bool) {
 	cm.RLock()
 	defer cm.RUnlock()
@@ -147,6 +195,12 @@ func (cm *CacheManager) CompleteProgress(path string) {
 	if progress, exists := cm.active[path]; exists {
 		progress.IsComplete = true
 	}
+	go func() {
+		time.Sleep(1 * time.Second)
+		cm.Lock()
+		delete(cm.active, path)
+		cm.Unlock()
+	}()
 }
 
 func (cm *CacheManager) GetGlobalProgress() GlobalProgress {

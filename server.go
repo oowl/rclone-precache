@@ -82,6 +82,11 @@ func (s *Server) handlePrecache(c *gin.Context) {
 	sourcePath := filepath.Join(s.mountPath, reqPath)
 	cachePath := filepath.Join(s.cachePath, reqPath)
 
+	if _, exists := s.cacheManager.GetProgress(sourcePath); exists {
+		c.JSON(http.StatusBadRequest, gin.H{"message": fmt.Sprintf("Precache already in progress for %s", reqPath)})
+		return
+	}
+
 	_, err := s.cacheManager.StartProgress(sourcePath, cachePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
