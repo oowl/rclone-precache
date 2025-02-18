@@ -62,6 +62,21 @@
             </svg>
         );
 
+        const CheckIcon = () => (
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="w-5 h-5 text-green-500 mr-2"
+            >
+                <path d="M20 6L9 17l-5-5" />
+            </svg>
+        );
+
         const LoadingSpinner = () => (
             <div className="flex justify-center items-center h-64">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
@@ -377,11 +392,12 @@
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">
                                                     {formatSize(entry.cached_size)}
-                                                    {precachingItems.has(entry.path) && (
-                                                        <span className="ml-2 inline-block">
+                                                    <span className="ml-2 inline-block">
+                                                        {precachingItems.has(entry.path) && (
                                                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-                                                        </span>
-                                                    )}
+                                                        )}
+                                                        {entry.size > 0 && entry.cached_size >= entry.size ? <CheckIcon /> : ''}
+                                                    </span>
                                                 </td>
                                                 <td className="px-6 py-4 text-sm whitespace-nowrap">
                                                     <button
