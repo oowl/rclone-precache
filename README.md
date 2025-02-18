@@ -6,6 +6,10 @@ Disclaimer: AI generated README and most of the code.
 
 File Cache Manager is a web-based application that helps manage and monitor file caching between a network mount and a local VFS cache. It provides an intuitive interface for browsing files and directories, precaching content, and monitoring cache status in real-time.
 
+
+![screenshot](screenshot.png)
+
+
 ## Features
 
 - **File Browser**: Browse files and directories on the network mount
