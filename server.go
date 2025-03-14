@@ -16,6 +16,18 @@ import (
 //go:embed frontend/index.html
 var indexHTML string
 
+//go:embed frontend/js/tailwindcss.js
+var tailwindcssJS string
+
+//go:embed frontend/js/react.production.min.js
+var reactJS string
+
+//go:embed frontend/js/react-dom.production.min.js
+var reactDomJS string
+
+//go:embed frontend/js/babel.min.js
+var babelJS string
+
 type Server struct {
 	cacheManager *CacheManager
 	sizer        *DirectorySizer
@@ -137,6 +149,24 @@ func (s *Server) SetupRouter() *gin.Engine {
 		api.POST("/precache/*path", s.handlePrecache)
 		api.GET("/cache-progress/*path", s.handleCacheProgress)
 	}
+
+	// Serve JS
+	router.GET("/js/tailwindcss.js", func(c *gin.Context) {
+		c.Header("Content-Type", "application/javascript")
+		c.String(http.StatusOK, tailwindcssJS)
+	})
+	router.GET("/js/react.production.min.js", func(c *gin.Context) {
+		c.Header("Content-Type", "application/javascript")
+		c.String(http.StatusOK, reactJS)
+	})
+	router.GET("/js/react-dom.production.min.js", func(c *gin.Context) {
+		c.Header("Content-Type", "application/javascript")
+		c.String(http.StatusOK, reactDomJS)
+	})
+	router.GET("/js/babel.min.js", func(c *gin.Context) {
+		c.Header("Content-Type", "application/javascript")
+		c.String(http.StatusOK, babelJS)
+	})
 
 	// Serve index.html for all other routes
 	router.NoRoute(func(c *gin.Context) {

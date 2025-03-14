@@ -13,6 +13,11 @@ use handlers::{handle_browse, handle_precache, handle_cache_progress};
 
 // Include the HTML file at compile time
 const INDEX_HTML: &str = include_str!("../frontend/index.html");
+const TAILWIND_CSS: &str = include_str!("../frontend/js/tailwindcss.js");
+const REACT: &str = include_str!("../frontend/js/react.production.min.js");
+const REACT_DOM: &str = include_str!("../frontend/js/react-dom.production.min.js");
+const BABEL: &str = include_str!("../frontend/js/babel.min.js");
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -69,6 +74,11 @@ async fn main() -> std::io::Result<()> {
                     .route("/precache/{path:.*}", web::post().to(handle_precache))
                     .route("/cache-progress/{path:.*}", web::get().to(handle_cache_progress))
             )
+            // serve js
+            .route("/js/tailwindcss.js", web::get().to(|| async { HttpResponse::Ok().content_type("text/javascript").body(TAILWIND_CSS) }))
+            .route("/js/react.production.min.js", web::get().to(|| async { HttpResponse::Ok().content_type("text/javascript").body(REACT) }))
+            .route("/js/react-dom.production.min.js", web::get().to(|| async { HttpResponse::Ok().content_type("text/javascript").body(REACT_DOM) }))
+            .route("/js/babel.min.js", web::get().to(|| async { HttpResponse::Ok().content_type("text/javascript").body(BABEL) }))
             // Serve index.html for all other routes
             .default_service(web::get().to(serve_index))
     })
