@@ -9,6 +9,7 @@ func main() {
 	MountPath := flag.String("mount", "", "Source path")
 	CachePath := flag.String("cache", "", "Cache path")
 	ChunkSize := flag.Int("chunk", 1, "Chunk size in MB for caching")
+	ThreadCount := flag.Int("thread", 2, "Threads count caching")
 	flag.Parse()
 
 	if *MountPath == "" || *CachePath == "" {
@@ -16,7 +17,7 @@ func main() {
 	}
 
 	// Create server instance
-	server := NewServer(*MountPath, *CachePath, *ChunkSize*1024*1024)
+	server := NewServer(*MountPath, *CachePath, *ChunkSize*1024*1024, *ThreadCount)
 	r := server.SetupRouter()
 	if err := r.Run(":8000"); err != nil {
 		log.Fatal(err)

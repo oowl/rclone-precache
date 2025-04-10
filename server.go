@@ -33,14 +33,16 @@ type Server struct {
 	sizer        *DirectorySizer
 	mountPath    string
 	cachePath    string
+	threadCount  int
 }
 
-func NewServer(mountPath string, cachePath string, chunkSize int) *Server {
+func NewServer(mountPath string, cachePath string, chunkSize int, threadCount int) *Server {
 	return &Server{
 		cacheManager: NewCacheManager(chunkSize),
 		sizer:        NewDirectorySizer(),
 		mountPath:    mountPath,
 		cachePath:    cachePath,
+		threadCount:  threadCount,
 	}
 }
 
@@ -99,7 +101,7 @@ func (s *Server) handlePrecache(c *gin.Context) {
 		return
 	}
 
-	_, err := s.cacheManager.StartProgress(sourcePath, cachePath)
+	_, err := s.cacheManager.StartProgress(sourcePath, cachePath, s.threadCount)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
