@@ -7,9 +7,15 @@ mod directory_sizer;
 mod handlers;
 mod models;
 mod server;
+mod storage_backend;
+mod local_backend;
+mod webdav_backend;
 
 use handlers::{handle_browse, handle_cache_progress, handle_precache};
 use server::Server;
+use storage_backend::StorageBackend;
+use local_backend::LocalFileSystem;
+use webdav_backend::WebDAVBackend;
 
 // Include the HTML file at compile time
 const INDEX_HTML: &str = include_str!("../frontend/index.html");
@@ -21,15 +27,35 @@ const BABEL: &str = include_str!("../frontend/js/babel.min.js");
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long)]
-    mount: PathBuf,
+    /// Type of mount: local or webdav
+    #[arg(long, default_value = "local")]
+    mount_type: String,
 
+    /// Mount path (for local filesystem)
+    #[arg(long)]
+    mount: Option<PathBuf>,
+
+    /// WebDAV server URL (for webdav)
+    #[arg(long)]
+    webdav_url: Option<String>,
+
+    /// WebDAV username
+    #[arg(long)]
+    webdav_username: Option<String>,
+
+    /// WebDAV password
+    #[arg(long)]
+    webdav_password: Option<String>,
+
+    /// Cache directory path
     #[arg(long)]
     cache: PathBuf,
 
+    /// Chunk size in MB
     #[arg(long, default_value = "1")]
     chunk: usize,
 
+    /// Number of cache threads
     #[arg(long, default_value = "2")]
     threads: usize,
 }
@@ -47,13 +73,50 @@ async fn main() -> std::io::Result<()> {
 
     let args = Args::parse();
 
-    if !args.mount.exists() || !args.cache.exists() {
-        tracing::error!("Mount and cache paths must exist");
+    if !args.cache.exists() {
+        tracing::error!("Cache path must exist");
         std::process::exit(1);
     }
 
+    // Create storage backend based on mount type
+    let storage_backend: Box<dyn StorageBackend> = match args.mount_type.as_str() {
+        "local" => {
+            let mount_path = args.mount.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--mount is required for local mount type",
+                )
+            })?;
+
+            if !mount_path.exists() {
+                tracing::error!("Mount path must exist");
+                std::process::exit(1);
+            }
+
+            Box::new(LocalFileSystem::new(mount_path.clone()))
+        }
+        "webdav" => {
+            let webdav_url = args.webdav_url.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--webdav-url is required for webdav mount type",
+                )
+            })?;
+
+            Box::new(WebDAVBackend::new(
+                webdav_url.clone(),
+                args.webdav_username,
+                args.webdav_password,
+            )?)
+        }
+        _ => {
+            tracing::error!("Invalid mount type. Use 'local' or 'webdav'");
+            std::process::exit(1);
+        }
+    };
+
     let server = Server::new(
-        args.mount,
+        storage_backend,
         args.cache,
         args.chunk * 1024 * 1024,
         args.threads,

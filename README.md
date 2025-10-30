@@ -1,10 +1,10 @@
 # File Cache Manager
 
-Actively precache a rclone mount that has VFS cache.
+Actively precache a rclone mount or WebDAV directory with VFS cache support.
 
 Disclaimer: AI generated README and most of the code.
 
-File Cache Manager is a web-based application that helps manage and monitor file caching between a network mount and a local VFS cache. It provides an intuitive interface for browsing files and directories, precaching content, and monitoring cache status in real-time.
+File Cache Manager is a web-based application that helps manage and monitor file caching from network mounts (local filesystem or WebDAV) to a local VFS cache. It provides an intuitive interface for browsing files and directories, precaching content, and monitoring cache status in real-time.
 
 
 ![screenshot](screenshot.png)
@@ -12,6 +12,7 @@ File Cache Manager is a web-based application that helps manage and monitor file
 
 ## Features
 
+- **Multiple Storage Backends**: Support for both local filesystem and WebDAV
 - **File Browser**: Browse files and directories on the network mount
 - **Cache Management**: Precache files and directories recursively
 - **Real-time Monitoring**: Track precaching progress and speed
@@ -20,10 +21,11 @@ File Cache Manager is a web-based application that helps manage and monitor file
 
 ## Architecture
 
-The application consists of two main components:
+The application consists of:
 
-1. **Backend (Go)**
-   - Built with Gin web framework
+1. **Backend (Rust)**
+   - Built with Actix-web framework
+   - Pluggable storage backends (Local filesystem and WebDAV)
    - Handles file system operations
    - Manages cache operations
    - Provides REST API endpoints
@@ -44,20 +46,49 @@ cd rclone-precache
 
 2. Build the application:
 ```bash
-go build
+cargo build --release
 ```
 
 ## Configuration
 
-The application requires two main path configurations:
+### Local Filesystem Mount
 
-- `PATH1`: The network mount path
-- `PATH2`: The VFS cache path
+For a local rclone mount or any local directory:
 
-Example configuration:
 ```bash
-./rclone-precache -mount /path/to/network/mount -cache /path/to/vfs/cache
+./target/release/rclone-precache \
+  --mount-type local \
+  --mount /path/to/network/mount \
+  --cache /path/to/vfs/cache \
+  --chunk 1 \
+  --threads 2
 ```
+
+### WebDAV Mount
+
+For a WebDAV server (e.g., Nextcloud, ownCloud):
+
+```bash
+./target/release/rclone-precache \
+  --mount-type webdav \
+  --webdav-url https://your-webdav-server.com/remote.php/dav/files/username/ \
+  --webdav-username your_username \
+  --webdav-password your_password \
+  --cache /path/to/vfs/cache \
+  --chunk 1 \
+  --threads 2
+```
+
+### Command Line Options
+
+- `--mount-type`: Type of mount - `local` or `webdav` (default: `local`)
+- `--mount`: Path to the local mount (required for `local` type)
+- `--webdav-url`: WebDAV server URL (required for `webdav` type)
+- `--webdav-username`: WebDAV username (optional)
+- `--webdav-password`: WebDAV password (optional)
+- `--cache`: Path to the VFS cache directory (required)
+- `--chunk`: Chunk size in MB for caching operations (default: 1)
+- `--threads`: Number of concurrent cache threads (default: 2)
 
 ## API Endpoints
 
@@ -129,22 +160,47 @@ The web interface is compatible with modern browsers:
 ## Development
 
 ### Prerequisites
-- Go 1.16 or later
-- Node.js 14 or later (for frontend development)
-- Network mount and VFS cache setup
+- Rust 1.70 or later
+- Cargo package manager
+- Network mount (local or WebDAV) and VFS cache setup
 
 ### Building from Source
-1. Build the backend:
 ```bash
-go build
+cargo build --release
 ```
 
-2. Build the frontend (if modifying):
+The binary will be available at `./target/release/rclone-precache`
+
+### Development Mode
 ```bash
-cd frontend
-npm install
-npm run build
+cargo run -- --mount-type local --mount /path/to/mount --cache /path/to/cache
 ```
+
+## Use Cases
+
+### Rclone Mount with VFS Cache
+Perfect for precaching files from an rclone mount:
+```bash
+# Start rclone mount
+rclone mount remote:path /mnt/remote --vfs-cache-mode full --cache-dir /var/cache/rclone
+
+# Start precache manager
+./rclone-precache --mount-type local --mount /mnt/remote --cache /var/cache/rclone
+```
+
+### Nextcloud/ownCloud WebDAV
+Access and precache files directly from Nextcloud without mounting:
+```bash
+./rclone-precache \
+  --mount-type webdav \
+  --webdav-url https://cloud.example.com/remote.php/dav/files/user/ \
+  --webdav-username user \
+  --webdav-password pass \
+  --cache /var/cache/webdav
+```
+
+### Other WebDAV Servers
+Works with any WebDAV-compatible server.
 
 ## License
 

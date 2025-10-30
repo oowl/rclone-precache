@@ -1,5 +1,4 @@
 use actix_web::{web, HttpResponse, Result};
-use std::path::PathBuf;
 use crate::server::Server;
 
 pub async fn handle_browse(

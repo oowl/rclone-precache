@@ -1,7 +1,7 @@
 use crate::cache_manager::CacheManager;
 use crate::directory_sizer::DirectorySizer;
 use crate::models::{FileInfo, GlobalProgress};
-use std::os::unix::fs::MetadataExt;
+use crate::storage_backend::StorageBackend;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,72 +9,70 @@ use std::sync::Arc;
 pub struct Server {
     cache_manager: Arc<CacheManager>,
     directory_sizer: Arc<DirectorySizer>,
-    mount_path: PathBuf,
+    storage_backend: Arc<dyn StorageBackend>,
     cache_path: PathBuf,
     cache_threads: usize,
 }
 
 impl Server {
     pub fn new(
-        mount_path: PathBuf,
+        storage_backend: Box<dyn StorageBackend>,
         cache_path: PathBuf,
         chunk_size: usize,
         cache_threads: usize,
     ) -> Self {
+        let storage_arc = Arc::from(storage_backend);
         Self {
-            cache_manager: Arc::new(CacheManager::new(chunk_size)),
+            cache_manager: Arc::new(CacheManager::new(chunk_size, Arc::clone(&storage_arc))),
             directory_sizer: Arc::new(DirectorySizer::new()),
-            mount_path,
+            storage_backend: storage_arc,
             cache_path,
             cache_threads,
         }
     }
 
     pub async fn browse(&self, path: &str) -> Result<Vec<FileInfo>, std::io::Error> {
-        // if path starts with /, add a .
-        let path2 = if path.starts_with("/") {
-            &path[1..]
-        } else {
-            path
-        };
-        let full_path = self.mount_path.join(path2);
-        let mut entries = Vec::new();
-
-        let mut dir = tokio::fs::read_dir(full_path).await?;
-        while let Some(entry) = dir.next_entry().await? {
-            let metadata = entry.metadata().await?;
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy().into_owned();
-
-            let size = if metadata.is_file() {
-                Some(metadata.len() as i64)
+        let entries = self.storage_backend.list_dir(path).await?;
+        println!("Browsing path: {}, found entries: {:?}", path, entries);
+        let mut file_infos = Vec::new();
+        for entry in entries {
+            let cached_size = if entry.is_dir {
+                // For directories, calculate cache size from cache path
+                let rel_path = if path.starts_with('/') {
+                    &path[1..]
+                } else {
+                    path
+                };
+                let cache_dir_path = self.cache_path.join(rel_path).join(&entry.name);
+                self.directory_sizer
+                    .get_allocated_size(&cache_dir_path)
+                    .await
+                    .abs()
             } else {
-                None
+                // For files, check cache
+                let rel_path = if path.starts_with('/') {
+                    &path[1..]
+                } else {
+                    path
+                };
+                let cache_file_path = self.cache_path.join(rel_path).join(&entry.name);
+                self.directory_sizer
+                    .get_allocated_size(&cache_file_path)
+                    .await
+                    .abs()
             };
 
-            // get the rel path of entry.path to mount_path
-            let entry_path = entry.path();
-            let rel_path = entry_path.strip_prefix(&self.mount_path).unwrap();
-
-            entries.push(FileInfo {
-                name: file_name.clone(),
-                path: format!("{}/{}", path, file_name.clone()),
-                is_dir: metadata.is_dir(),
-                size,
-                created_time: metadata
-                    .accessed()?
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-                    .as_secs_f64(),
-                cached_size: self
-                    .directory_sizer
-                    .get_allocated_size(&self.cache_path.join(rel_path))
-                    .await
-                    .abs(),
+            file_infos.push(FileInfo {
+                name: entry.name,
+                path: entry.path,
+                is_dir: entry.is_dir,
+                size: entry.size,
+                created_time: entry.modified_time,
+                cached_size,
             });
         }
 
-        Ok(entries)
+        Ok(file_infos)
     }
 
     pub async fn start_precache(&self, path: &str) -> Result<(), std::io::Error> {
@@ -83,11 +81,10 @@ impl Server {
         } else {
             path
         };
-        let source_path = self.mount_path.join(path2);
         let cache_path = self.cache_path.join(path2);
 
         self.cache_manager
-            .start_progress(source_path, cache_path, Some(self.cache_threads))
+            .start_progress(path.to_string(), cache_path, Some(self.cache_threads))
             .await?;
         Ok(())
     }
@@ -97,14 +94,7 @@ impl Server {
             return Ok(self.cache_manager.get_global_progress().await);
         }
 
-        let path2 = if path.starts_with("/") {
-            &path[1..]
-        } else {
-            path
-        };
-
-        let source_path = self.mount_path.join(path2);
-        match self.cache_manager.get_progress(&source_path).await {
+        match self.cache_manager.get_progress(path).await {
             Some(progress) => Ok(GlobalProgress {
                 total_speed: progress.read().current_speed,
                 overall_percent: (progress.read().total_bytes_read as f64

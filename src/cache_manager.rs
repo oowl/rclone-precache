@@ -1,42 +1,48 @@
-use crate::directory_sizer::DirectorySizer;
 use crate::models::{CacheProgress, GlobalProgress};
+use crate::storage_backend::StorageBackend;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::SeekFrom;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
 
 pub struct CacheManager {
     chunk_size: usize,
-    directory_sizer: Arc<DirectorySizer>,
-    active: Arc<RwLock<HashMap<PathBuf, Arc<RwLock<CacheProgress>>>>>,
+    storage_backend: Arc<dyn StorageBackend>,
+    active: Arc<RwLock<HashMap<String, Arc<RwLock<CacheProgress>>>>>,
 }
 
 impl CacheManager {
-    pub fn new(chunk_size: usize) -> Self {
+    pub fn new(chunk_size: usize, storage_backend: Arc<dyn StorageBackend>) -> Self {
         Self {
             chunk_size,
-            directory_sizer: Arc::new(DirectorySizer::new()),
+            storage_backend,
             active: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub async fn start_progress(
         &self,
-        source_path: PathBuf,
-        _: PathBuf,
+        source_path: String,
+        cache_path: PathBuf,
         threads: Option<usize>,
     ) -> Result<(), std::io::Error> {
         let thread_count = threads.unwrap_or(1);
 
+        // Get file size from storage backend
+        let total_size = if let Ok(size) = self.storage_backend.file_size(&source_path).await {
+            size
+        } else {
+            // It's a directory, calculate size recursively
+            self.calculate_directory_size(&source_path).await
+        };
+
         let progress = Arc::new(RwLock::new(CacheProgress {
             current_speed: 0.0,
             total_bytes_read: 0,
-            total_size: self.directory_sizer.get_allocated_size(&source_path).await,
+            total_size,
             is_complete: false,
             cached_size: 0,
             speed_windows: Vec::new(),
@@ -50,10 +56,13 @@ impl CacheManager {
         let source_path_clone = source_path.clone();
         let chunk_size = self.chunk_size;
         let active_clone = Arc::clone(&self.active);
+        let storage_backend = Arc::clone(&self.storage_backend);
 
         tokio::spawn(async move {
             if let Err(e) = Self::cache_file(
+                &storage_backend,
                 &source_path_clone,
+                cache_path,
                 &progress_clone,
                 chunk_size,
                 thread_count,
@@ -71,7 +80,7 @@ impl CacheManager {
         Ok(())
     }
 
-    pub async fn get_progress(&self, path: &PathBuf) -> Option<Arc<RwLock<CacheProgress>>> {
+    pub async fn get_progress(&self, path: &str) -> Option<Arc<RwLock<CacheProgress>>> {
         self.active.read().get(path).cloned()
     }
 
@@ -101,149 +110,114 @@ impl CacheManager {
         }
     }
 
+    fn calculate_directory_size<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = i64> + Send + 'a>> {
+        Box::pin(async move {
+            let mut total_size = 0i64;
+
+            if let Ok(entries) = self.storage_backend.list_dir(path).await {
+                for entry in entries {
+                    if entry.is_dir {
+                        total_size += self.calculate_directory_size(&entry.path).await;
+                    } else if let Some(size) = entry.size {
+                        total_size += size;
+                    }
+                }
+            }
+
+            total_size
+        })
+    }
+
     async fn cache_file(
-        source_path: &PathBuf,
+        storage_backend: &Arc<dyn StorageBackend>,
+        source_path: &str,
+        cache_path: PathBuf,
         progress: &Arc<RwLock<CacheProgress>>,
         chunk_size: usize,
         threads: usize,
     ) -> Result<(), std::io::Error> {
-        Self::cache_file_inner(source_path, progress, chunk_size, threads).await
+        Self::cache_file_inner(storage_backend, source_path, cache_path, progress, chunk_size, threads).await
     }
 
     fn cache_file_inner<'a>(
-        source_path: &'a PathBuf,
+        storage_backend: &'a Arc<dyn StorageBackend>,
+        source_path: &'a str,
+        cache_path: PathBuf,
         progress: &'a Arc<RwLock<CacheProgress>>,
         chunk_size: usize,
         in_threads: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + 'a>> {
         Box::pin(async move {
-            // If file is directory, recursively cache all files in directory
-            if tokio::fs::metadata(source_path).await?.is_dir() {
-                let mut dir = tokio::fs::read_dir(source_path).await?;
-                while let Some(entry) = dir.next_entry().await? {
-                    let entry_path = entry.path();
-                    Self::cache_file(&entry_path, progress, chunk_size, in_threads).await?;
+            // Check if it's a directory
+            let entry = storage_backend.metadata(source_path).await?;
+            
+            if entry.is_dir {
+                // Create cache directory if it doesn't exist
+                tokio::fs::create_dir_all(&cache_path).await?;
+                
+                // Recursively cache all files in directory
+                let entries = storage_backend.list_dir(source_path).await?;
+                for entry in entries {
+                    let sub_cache_path = cache_path.join(&entry.name);
+                    Self::cache_file(storage_backend, &entry.path, sub_cache_path, progress, chunk_size, in_threads).await?;
                 }
                 return Ok(());
             }
 
-            let mut threads = in_threads;
-
-            // For regular files, use multi-threaded approach
-            let file_size = tokio::fs::metadata(source_path).await?.len();
-
-            // If file is small, don't use multiple threads
-            if file_size < (chunk_size * threads) as u64 {
-                threads = 1;
+            // For regular files, read from storage backend and write to cache
+            // Create parent directory if it doesn't exist
+            if let Some(parent) = cache_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
+            
+            let mut reader = storage_backend.open_file(source_path).await?;
+            let mut writer = tokio::fs::File::create(&cache_path).await?;
+            
+            let mut buffer = vec![0u8; chunk_size];
+            let mut total_bytes_read = 0i64;
+            let mut last_update = std::time::SystemTime::now();
 
-            // Define overlap size - 5% of the chunk or 1MB, whichever is smaller
-            let overlap_size = std::cmp::min((file_size / threads as u64) / 20, 1024 * 1024);
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        // Write to cache file
+                        tokio::io::AsyncWriteExt::write_all(&mut writer, &buffer[..n]).await?;
 
-            // Calculate segment size for each thread
-            let segment_size = file_size / threads as u64;
+                        total_bytes_read += n as i64;
+                        let now = std::time::SystemTime::now();
 
-            // Create a vector to store all thread futures
-            let mut handles = Vec::with_capacity(threads);
-
-            // Create and spawn threads
-            for thread_idx in 0..threads {
-                let source_path_clone = source_path.clone();
-                let progress_clone = Arc::clone(progress);
-
-                // Calculate start and end positions for this thread
-                let start_pos = if thread_idx == 0 {
-                    0
-                } else {
-                    thread_idx as u64 * segment_size - overlap_size
-                };
-
-                let end_pos = if thread_idx == threads - 1 {
-                    file_size
-                } else {
-                    (thread_idx + 1) as u64 * segment_size
-                };
-
-                let handle = tokio::spawn(async move {
-                    Self::read_file_segment(
-                        &source_path_clone,
-                        &progress_clone,
-                        chunk_size,
-                        start_pos,
-                        end_pos,
-                    )
-                    .await
-                });
-
-                handles.push(handle);
-            }
-
-            // Wait for all threads to complete
-            for handle in handles {
-                if let Err(e) = handle.await? {
-                    tracing::error!("Error in thread reading file segment: {}", e);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Thread error",
-                    ));
+                        let time_passed = now
+                            .duration_since(last_update)
+                            .unwrap_or(std::time::Duration::from_secs(0));
+                        if time_passed >= std::time::Duration::from_secs(1) {
+                            let mut progress_guard = progress.write();
+                            progress_guard.total_bytes_read += total_bytes_read;
+                            progress_guard.update_speed(total_bytes_read, now);
+                            progress_guard.cached_size += total_bytes_read;
+                            total_bytes_read = 0;
+                            last_update = now;
+                        }
+                    }
+                    Err(e) => return Err(e),
                 }
+            }
+
+            // Flush and sync the file to disk
+            tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+            writer.sync_all().await?;
+
+            if total_bytes_read > 0 {
+                let mut progress_guard = progress.write();
+                progress_guard.total_bytes_read += total_bytes_read;
+                progress_guard.update_speed(total_bytes_read, std::time::SystemTime::now());
+                progress_guard.cached_size += total_bytes_read;
             }
 
             Ok(())
         })
-    }
-
-    async fn read_file_segment(
-        source_path: &PathBuf,
-        progress: &Arc<RwLock<CacheProgress>>,
-        chunk_size: usize,
-        start_pos: u64,
-        end_pos: u64,
-    ) -> Result<(), std::io::Error> {
-        let mut file = File::open(source_path).await?;
-
-        // Seek to the starting position
-        file.seek(SeekFrom::Start(start_pos)).await?;
-
-        let mut buffer = vec![0u8; chunk_size];
-        let mut bytes_read = 0;
-        let mut last_update = std::time::SystemTime::now();
-        let mut current_pos = start_pos;
-
-        while current_pos < end_pos {
-            // Calculate how much to read in this iteration
-            let bytes_to_read = std::cmp::min(chunk_size, (end_pos - current_pos) as usize);
-
-            // Read the chunk
-            let n = file.read(&mut buffer[0..bytes_to_read]).await?;
-            if n == 0 {
-                break; // End of file
-            }
-
-            current_pos += n as u64;
-            bytes_read += n as i64;
-            let now = std::time::SystemTime::now();
-
-            let time_passed = now
-                .duration_since(last_update)
-                .unwrap_or(std::time::Duration::from_secs(0));
-            if time_passed >= std::time::Duration::from_secs(1) {
-                let mut progress_guard = progress.write();
-                progress_guard.total_bytes_read += bytes_read;
-                progress_guard.update_speed(bytes_read, now);
-                progress_guard.cached_size += bytes_read;
-                bytes_read = 0;
-                last_update = now;
-            }
-        }
-
-        if bytes_read > 0 {
-            let mut progress_guard = progress.write();
-            progress_guard.total_bytes_read += bytes_read;
-            progress_guard.update_speed(bytes_read, std::time::SystemTime::now());
-            progress_guard.cached_size += bytes_read;
-        }
-
-        Ok(())
     }
 }

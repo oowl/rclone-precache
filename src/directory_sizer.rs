@@ -80,7 +80,7 @@ impl DirectorySizer {
             }
 
             let mut total_size = 0;
-            let mut cache_hits = 0;
+            let mut _cache_hits = 0;
 
             let mut read_dir = match tokio::fs::read_dir(path).await {
                 Ok(rd) => rd,
@@ -91,9 +91,10 @@ impl DirectorySizer {
                 let path = entry.path();
                 let path_str = path.to_string_lossy().to_string();
 
-                if let Some(size) = self.check_cache(&path_str) {
-                    cache_hits += 1;
-                    total_size += size;
+                // Check cache first
+                if let Some(cached_size) = self.check_cache(&path_str) {
+                    total_size += cached_size;
+                    _cache_hits += 1;
                     continue;
                 }
 
